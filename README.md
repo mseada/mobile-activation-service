@@ -96,6 +96,17 @@ Simulated outages (configured under `stubs.failing-msisdns`):
 | `201000000003` | CRM (503) |
 | `201000000004` | Kafka |
 
+## Postman
+
+`postman/mobile-activation-service.postman_collection.json` covers the happy path, each simulated
+downstream outage (with retries), a partial multi-item order, and validation errors. Import it into
+Postman and run the whole collection in order (Collection Runner) against a local instance with stubs
+enabled, or from the CLI:
+
+```bash
+newman run postman/mobile-activation-service.postman_collection.json --env-var baseUrl=http://localhost:8080
+```
+
 ## Configuration
 
 | Property / env var | Default |
