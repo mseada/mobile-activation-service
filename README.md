@@ -61,8 +61,8 @@ curl localhost:8080/tmf-api/productOrderingManagement/v4/productOrder/<id>
 
 ### Order requirements
 
-- `relatedParty` entry with `role: Customer` and an `id`
-- each `productOrderItem`: `action: add`, `productOffering.id` (tariff plan), and `product.productCharacteristic`
+- `relatedParty` entry with `role: Customer` and an `id` (1-64 chars: letters, digits, `.`, `_`, `-`)
+- each `productOrderItem`: `action: add`, `quantity` 1 (or omitted), `productOffering.id` (tariff plan), and `product.productCharacteristic`
   containing `MSISDN` (E.164, optional leading `+`) and `ICCID` (19-20 digits)
 
 Invalid orders are rejected with `400` and a TMF `Error` body.

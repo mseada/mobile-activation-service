@@ -2,6 +2,7 @@ package com.telecom.activation.stub;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import lombok.RequiredArgsConstructor;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.component.kafka.KafkaConstants;
@@ -26,6 +27,7 @@ public class KafkaStubRoute extends RouteBuilder {
     public void configure() {
         from(ENDPOINT)
                 .routeId("kafka-stub")
+                .errorHandler(noErrorHandler())
                 .process(exchange -> {
                     String key = exchange.getMessage().getHeader(KafkaConstants.KEY, String.class);
                     String payload = exchange.getMessage().getBody(String.class);
@@ -33,7 +35,7 @@ public class KafkaStubRoute extends RouteBuilder {
                     String eventMsisdn = msisdn == null ? key : msisdn.asText();
                     if (properties.shouldFail(SYSTEM, eventMsisdn)) {
                         registry.recordInvocation(SYSTEM, "publish", eventMsisdn, 503);
-                        throw new IllegalStateException("Kafka broker unavailable (stub)");
+                        throw new IOException("Kafka broker unavailable (stub)");
                     }
                     registry.recordInvocation(SYSTEM, "publish", eventMsisdn, 200);
                     registry.recordEvent(key, payload);

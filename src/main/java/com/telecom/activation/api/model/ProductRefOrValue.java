@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -33,6 +34,7 @@ public class ProductRefOrValue {
             return Optional.empty();
         }
         return productCharacteristic.stream()
+                .filter(Objects::nonNull)
                 .filter(c -> characteristicName.equalsIgnoreCase(c.getName()))
                 .map(Characteristic::getValue)
                 .filter(value -> value != null)

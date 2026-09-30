@@ -49,6 +49,7 @@ public class OrderFulfillmentTracker {
         String step = exchange.getProperty(MobileActivationRoutes.STEP, String.class);
         Throwable cause = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Throwable.class);
         String message = describe(cause);
+        log.warn("ProductOrder {} item {} {} step failure detail", order.getId(), activation.getOrderItemId(), step, cause);
 
         item(order, activation.getOrderItemId()).setState(ProductOrderItemStateType.FAILED);
         order.getErrorMessage().add(new ProductOrderErrorMessage(
@@ -119,14 +120,14 @@ public class OrderFulfillmentTracker {
         Throwable current = throwable;
         while (current != null) {
             if (current instanceof HttpOperationFailedException http) {
-                return "HTTP " + http.getStatusCode() + " from " + http.getUri() + ": " + http.getResponseBody();
+                return "Downstream system returned HTTP " + http.getStatusCode();
             }
             if (current.getCause() == null || current.getCause() == current) {
                 break;
             }
             current = current.getCause();
         }
-        return current == null ? "unknown error" : current.getClass().getSimpleName() + ": " + current.getMessage();
+        return current == null ? "unknown error" : "Downstream call failed (" + current.getClass().getSimpleName() + ")";
     }
 
     private static OffsetDateTime now() {

@@ -13,10 +13,7 @@ public class ActivationContextFactory {
         ActivationContext context = new ActivationContext();
         context.setOrderId(order.getId());
         context.setOrderItemId(item.getId());
-        context.setCustomerId(order.getRelatedParty().stream()
-                .filter(party -> MobileActivationOrderValidator.CUSTOMER_ROLE.equalsIgnoreCase(party.getRole()))
-                .map(party -> party.getId())
-                .findFirst()
+        context.setCustomerId(MobileActivationOrderValidator.customerId(order.getRelatedParty())
                 .orElseThrow(() -> new IllegalStateException("Customer relatedParty missing on order " + order.getId())));
         context.setMsisdn(MobileActivationOrderValidator.normalizeMsisdn(
                 item.getProduct().characteristicValue(MobileActivationOrderValidator.MSISDN).orElseThrow()));

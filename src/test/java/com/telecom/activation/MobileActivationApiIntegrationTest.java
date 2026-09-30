@@ -138,6 +138,46 @@ class MobileActivationApiIntegrationTest {
     }
 
     @Test
+    void retriesKafkaPublishWhenBrokerIsDown() {
+        ResponseEntity<JsonNode> created = post(order("201000000004", "89201012345678901236"));
+
+        JsonNode order = awaitFinalState(created.getBody().get("id").asText());
+        assertThat(order.get("state").asText()).isEqualTo("failed");
+        assertThat(order.get("errorMessage").get(0).get("code").asText()).isEqualTo("KAFKA_FAILED");
+        List<String> systems = stubRegistry.invocations().stream().map(StubInvocation::system).toList();
+        assertThat(systems).containsExactly("billing", "charging", "crm", "kafka", "kafka", "kafka");
+    }
+
+    @Test
+    void usesFirstCustomerWithIdWhenEarlierCustomerEntryIsBlank() {
+        String body = order("201012345679", "89201012345678901235").replace(
+                "{ \"id\": \"CUST-1001\"",
+                "{ \"role\": \"Customer\" }, { \"id\": \"CUST-1001\"");
+
+        ResponseEntity<JsonNode> response = post(body);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        JsonNode order = awaitFinalState(response.getBody().get("id").asText());
+        assertThat(order.get("state").asText()).isEqualTo("completed");
+    }
+
+    @Test
+    void rejectsInvalidOrdersWithBadRequest() {
+        String valid = order("201012345678", "89201012345678901234");
+        List<String> invalidBodies = List.of(
+                valid.replace("\"quantity\": 1", "\"quantity\": 2"),
+                valid.replace("\"CUST-1001\"", "\"CUST/1001?x=1\""),
+                valid.replace("\"relatedParty\": [", "\"relatedParty\": [ null,"),
+                valid.replace("\"productOrderItem\": [", "\"productOrderItem\": [ null,"),
+                valid.replace("\"productCharacteristic\": [", "\"productCharacteristic\": [ null,"));
+
+        for (String body : invalidBodies) {
+            assertThat(post(body).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        }
+        assertThat(stubRegistry.invocations()).isEmpty();
+    }
+
+    @Test
     void returnsNotFoundForUnknownOrder() {
         ResponseEntity<JsonNode> response = rest.getForEntity(ORDERS + "/does-not-exist", JsonNode.class);
 

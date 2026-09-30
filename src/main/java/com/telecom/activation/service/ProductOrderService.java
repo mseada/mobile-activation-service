@@ -53,7 +53,12 @@ public class ProductOrderService {
         repository.save(order);
         log.info("ProductOrder {} acknowledged with {} item(s)", order.getId(), order.getProductOrderItem().size());
 
-        producerTemplate.sendBody(MobileActivationRoutes.ORDER_FULFILLMENT_ENDPOINT, order.getId());
+        try {
+            producerTemplate.sendBody(MobileActivationRoutes.ORDER_FULFILLMENT_ENDPOINT, order.getId());
+        } catch (RuntimeException e) {
+            repository.deleteById(order.getId());
+            throw e;
+        }
         return order;
     }
 

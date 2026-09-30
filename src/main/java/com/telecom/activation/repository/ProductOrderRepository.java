@@ -22,6 +22,10 @@ public class ProductOrderRepository {
         return Optional.ofNullable(orders.get(id));
     }
 
+    public void deleteById(String id) {
+        orders.remove(id);
+    }
+
     public List<ProductOrder> findAll() {
         return orders.values().stream()
                 .sorted(Comparator.comparing(ProductOrder::getOrderDate).reversed())
