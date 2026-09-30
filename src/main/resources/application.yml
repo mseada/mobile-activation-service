@@ -1,0 +1,48 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: mobile-activation-service
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+camel:
+  springboot:
+    name: mobile-activation
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+fulfillment:
+  concurrent-consumers: 5
+
+# Downstream systems. Defaults point at the embedded stubs; override with env vars for real systems.
+integration:
+  billing:
+    url: ${BILLING_URL:http://localhost:${server.port}/stubs/billing}
+  charging:
+    url: ${CHARGING_URL:http://localhost:${server.port}/stubs/charging}
+  crm:
+    url: ${CRM_URL:http://localhost:${server.port}/stubs/crm}
+  kafka:
+    topic: ${KAFKA_TOPIC:telecom.mobile-line.activated}
+    brokers: ${KAFKA_BROKERS:localhost:9092}
+    endpoint: direct:kafkaStub
+  retry:
+    maximum-redeliveries: 2
+    redelivery-delay-ms: 500
+
+stubs:
+  enabled: ${STUBS_ENABLED:true}
+  # MSISDNs for which a stub simulates an outage (HTTP 503 / broker error)
+  failing-msisdns:
+    billing: ["201000000001"]
+    charging: ["201000000002"]
+    crm: ["201000000003"]
+    kafka: ["201000000004"]

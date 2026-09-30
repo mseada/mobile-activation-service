@@ -1,0 +1,4 @@
+# Publish activation events to a real Kafka broker instead of the in-memory stub.
+integration:
+  kafka:
+    endpoint: kafka:${integration.kafka.topic}?brokers=${integration.kafka.brokers}
