@@ -1,0 +1,1141 @@
+{
+  "info": {
+    "name": "Mobile Activation Service (TMF622)",
+    "description": "End-to-end tests for the TMF622 mobile activation API with stubbed billing, charging, CRM and Kafka.\n\nRun against a local instance (`mvn spring-boot:run`, stubs enabled). Run the whole collection in order with the Collection Runner or `newman run`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "orderId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Happy path",
+      "item": [
+        {
+          "name": "Reset stubs",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/stubs",
+            "description": "Clears recorded stub invocations and Kafka events so the next scenario starts clean."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"204 No Content\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create activation order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"+201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "// Fulfillment starts asynchronously, so the response may already show inProgress.",
+                  "pm.test(\"state is acknowledged or inProgress\", () => pm.expect(body.state).to.be.oneOf([\"acknowledged\", \"inProgress\"]));",
+                  "pm.test(\"Location header points to the order\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(body.id));",
+                  "pm.collectionVariables.set(\"orderId\", body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retrieve order (completed)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/{{orderId}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fulfillment is asynchronous; give the Camel route time to finish (incl. retries).",
+                  "setTimeout(() => {}, 1500);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"order state is completed\", () => pm.expect(body.state).to.eql(\"completed\"));",
+                  "pm.test(\"item states\", () => pm.expect(body.productOrderItem.map(i => i.state)).to.eql([\"completed\"]));",
+                  "pm.test(\"no errorMessage\", () => pm.expect(body.errorMessage || []).to.be.empty);",
+                  "pm.test(\"audit notes for all 4 steps\", () => {",
+                  "  const notes = body.note.map(n => n.text).join(\"\\n\");",
+                  "  [\"BILLING\", \"CHARGING\", \"CRM\", \"KAFKA\"].forEach(s => pm.expect(notes).to.include(s + \" step completed\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List completed orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder?state=completed"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"contains the order\", () => pm.expect(pm.response.json().map(o => o.id)).to.include(pm.collectionVariables.get(\"orderId\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stub invocations (billing -> charging -> CRM -> Kafka)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/stubs/invocations"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"downstream call sequence\", () => pm.expect(pm.response.json().map(i => i.system)).to.eql([\"billing\", \"charging\", \"crm\", \"kafka\"]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Published Kafka events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/stubs/kafka/events"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const events = pm.response.json();",
+                  "pm.test(\"one MobileLineActivatedEvent\", () => pm.expect(events).to.have.lengthOf(1));",
+                  "const e = events[0];",
+                  "pm.test(\"keyed by MSISDN\", () => pm.expect(e.key).to.eql(\"201012345678\"));",
+                  "pm.test(\"payload\", () => {",
+                  "  pm.expect(e.payload.eventType).to.eql(\"MobileLineActivatedEvent\");",
+                  "  pm.expect(e.payload.orderId).to.eql(pm.collectionVariables.get(\"orderId\"));",
+                  "  pm.expect(e.payload.billingSubscriptionId).to.match(/^SUB-/);",
+                  "  pm.expect(e.payload.chargingSubscriberId).to.match(/^OCS-/);",
+                  "  pm.expect(e.payload.crmAssetId).to.match(/^AST-/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Downstream outages",
+      "item": [
+        {
+          "name": "2.1 Billing outage",
+          "description": "MSISDN 201000000001 makes the Billing stub fail; the step is retried twice, then the order fails and later steps are skipped.",
+          "item": [
+            {
+              "name": "Reset stubs",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{baseUrl}}/stubs",
+                "description": "Clears recorded stub invocations and Kafka events so the next scenario starts clean."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"204 No Content\", () => pm.response.to.have.status(204));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Create order (Billing down)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201000000001\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+                      "const body = pm.response.json();",
+                      "// Fulfillment starts asynchronously, so the response may already show inProgress.",
+                      "pm.test(\"state is acknowledged or inProgress\", () => pm.expect(body.state).to.be.oneOf([\"acknowledged\", \"inProgress\"]));",
+                      "pm.test(\"Location header points to the order\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(body.id));",
+                      "pm.collectionVariables.set(\"billingOutageOrderId\", body.id);"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Retrieve order (failed)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/{{billingOutageOrderId}}"
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// Fulfillment is asynchronous; give the Camel route time to finish (incl. retries).",
+                      "setTimeout(() => {}, 3000);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "const body = pm.response.json();",
+                      "pm.test(\"order state is failed\", () => pm.expect(body.state).to.eql(\"failed\"));",
+                      "pm.test(\"item states\", () => pm.expect(body.productOrderItem.map(i => i.state)).to.eql([\"failed\"]));",
+                      "pm.test(\"errorMessage code is BILLING_FAILED\", () => pm.expect(body.errorMessage[0].code).to.eql(\"BILLING_FAILED\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Stub invocations (retries, no later steps)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/stubs/invocations"
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"downstream call sequence\", () => pm.expect(pm.response.json().map(i => i.system)).to.eql([\"billing\", \"billing\", \"billing\"]));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "2.2 Charging outage",
+          "description": "MSISDN 201000000002 makes the Charging stub fail; the step is retried twice, then the order fails and later steps are skipped.",
+          "item": [
+            {
+              "name": "Reset stubs",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{baseUrl}}/stubs",
+                "description": "Clears recorded stub invocations and Kafka events so the next scenario starts clean."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"204 No Content\", () => pm.response.to.have.status(204));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Create order (Charging down)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201000000002\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+                      "const body = pm.response.json();",
+                      "// Fulfillment starts asynchronously, so the response may already show inProgress.",
+                      "pm.test(\"state is acknowledged or inProgress\", () => pm.expect(body.state).to.be.oneOf([\"acknowledged\", \"inProgress\"]));",
+                      "pm.test(\"Location header points to the order\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(body.id));",
+                      "pm.collectionVariables.set(\"chargingOutageOrderId\", body.id);"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Retrieve order (failed)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/{{chargingOutageOrderId}}"
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// Fulfillment is asynchronous; give the Camel route time to finish (incl. retries).",
+                      "setTimeout(() => {}, 3000);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "const body = pm.response.json();",
+                      "pm.test(\"order state is failed\", () => pm.expect(body.state).to.eql(\"failed\"));",
+                      "pm.test(\"item states\", () => pm.expect(body.productOrderItem.map(i => i.state)).to.eql([\"failed\"]));",
+                      "pm.test(\"errorMessage code is CHARGING_FAILED\", () => pm.expect(body.errorMessage[0].code).to.eql(\"CHARGING_FAILED\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Stub invocations (retries, no later steps)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/stubs/invocations"
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"downstream call sequence\", () => pm.expect(pm.response.json().map(i => i.system)).to.eql([\"billing\", \"charging\", \"charging\", \"charging\"]));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "2.3 CRM outage",
+          "description": "MSISDN 201000000003 makes the CRM stub fail; the step is retried twice, then the order fails and later steps are skipped.",
+          "item": [
+            {
+              "name": "Reset stubs",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{baseUrl}}/stubs",
+                "description": "Clears recorded stub invocations and Kafka events so the next scenario starts clean."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"204 No Content\", () => pm.response.to.have.status(204));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Create order (CRM down)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201000000003\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+                      "const body = pm.response.json();",
+                      "// Fulfillment starts asynchronously, so the response may already show inProgress.",
+                      "pm.test(\"state is acknowledged or inProgress\", () => pm.expect(body.state).to.be.oneOf([\"acknowledged\", \"inProgress\"]));",
+                      "pm.test(\"Location header points to the order\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(body.id));",
+                      "pm.collectionVariables.set(\"crmOutageOrderId\", body.id);"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Retrieve order (failed)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/{{crmOutageOrderId}}"
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// Fulfillment is asynchronous; give the Camel route time to finish (incl. retries).",
+                      "setTimeout(() => {}, 3000);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "const body = pm.response.json();",
+                      "pm.test(\"order state is failed\", () => pm.expect(body.state).to.eql(\"failed\"));",
+                      "pm.test(\"item states\", () => pm.expect(body.productOrderItem.map(i => i.state)).to.eql([\"failed\"]));",
+                      "pm.test(\"errorMessage code is CRM_FAILED\", () => pm.expect(body.errorMessage[0].code).to.eql(\"CRM_FAILED\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Stub invocations (retries, no later steps)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/stubs/invocations"
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"downstream call sequence\", () => pm.expect(pm.response.json().map(i => i.system)).to.eql([\"billing\", \"charging\", \"crm\", \"crm\", \"crm\"]));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "2.4 Kafka outage",
+          "description": "MSISDN 201000000004 makes the Kafka stub fail; the step is retried twice, then the order fails and later steps are skipped.",
+          "item": [
+            {
+              "name": "Reset stubs",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{baseUrl}}/stubs",
+                "description": "Clears recorded stub invocations and Kafka events so the next scenario starts clean."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"204 No Content\", () => pm.response.to.have.status(204));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Create order (Kafka down)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201000000004\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+                      "const body = pm.response.json();",
+                      "// Fulfillment starts asynchronously, so the response may already show inProgress.",
+                      "pm.test(\"state is acknowledged or inProgress\", () => pm.expect(body.state).to.be.oneOf([\"acknowledged\", \"inProgress\"]));",
+                      "pm.test(\"Location header points to the order\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(body.id));",
+                      "pm.collectionVariables.set(\"kafkaOutageOrderId\", body.id);"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Retrieve order (failed)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/{{kafkaOutageOrderId}}"
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// Fulfillment is asynchronous; give the Camel route time to finish (incl. retries).",
+                      "setTimeout(() => {}, 3000);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "const body = pm.response.json();",
+                      "pm.test(\"order state is failed\", () => pm.expect(body.state).to.eql(\"failed\"));",
+                      "pm.test(\"item states\", () => pm.expect(body.productOrderItem.map(i => i.state)).to.eql([\"failed\"]));",
+                      "pm.test(\"errorMessage code is KAFKA_FAILED\", () => pm.expect(body.errorMessage[0].code).to.eql(\"KAFKA_FAILED\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Stub invocations (retries, no later steps)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/stubs/invocations"
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"downstream call sequence\", () => pm.expect(pm.response.json().map(i => i.system)).to.eql([\"billing\", \"charging\", \"crm\", \"kafka\", \"kafka\", \"kafka\"]));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Partial order (multi-item)",
+      "description": "Item 1 activates; item 2 hits the charging outage, so the order ends 'partial'.",
+      "item": [
+        {
+          "name": "Reset stubs",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/stubs",
+            "description": "Clears recorded stub invocations and Kafka events so the next scenario starts clean."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"204 No Content\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create 2-item order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345670\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901230\"\n          }\n        ]\n      }\n    },\n    {\n      \"id\": \"2\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201000000002\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901231\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "// Fulfillment starts asynchronously, so the response may already show inProgress.",
+                  "pm.test(\"state is acknowledged or inProgress\", () => pm.expect(body.state).to.be.oneOf([\"acknowledged\", \"inProgress\"]));",
+                  "pm.test(\"Location header points to the order\", () => pm.expect(pm.response.headers.get(\"Location\")).to.include(body.id));",
+                  "pm.collectionVariables.set(\"partialOrderId\", body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retrieve order (partial)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/{{partialOrderId}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fulfillment is asynchronous; give the Camel route time to finish (incl. retries).",
+                  "setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"order state is partial\", () => pm.expect(body.state).to.eql(\"partial\"));",
+                  "pm.test(\"item states\", () => pm.expect(body.productOrderItem.map(i => i.state)).to.eql([\"completed\", \"failed\"]));",
+                  "pm.test(\"errorMessage code is CHARGING_FAILED\", () => pm.expect(body.errorMessage[0].code).to.eql(\"CHARGING_FAILED\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Validation errors",
+      "item": [
+        {
+          "name": "Missing Customer relatedParty",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Agent\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions Customer\", () => pm.expect(body.message).to.include(\"Customer\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unsafe Customer id",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST/1001?x=1\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions Customer id\", () => pm.expect(body.message).to.include(\"Customer id\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invalid MSISDN",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"12AB\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions MSISDN\", () => pm.expect(body.message).to.include(\"MSISDN\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invalid ICCID",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"123\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions ICCID\", () => pm.expect(body.message).to.include(\"ICCID\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Quantity greater than 1",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 2,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions quantity\", () => pm.expect(body.message).to.include(\"quantity\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unsupported action (modify)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"modify\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions add\", () => pm.expect(body.message).to.include(\"add\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Missing productOffering",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions productOffering\", () => pm.expect(body.message).to.include(\"productOffering\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Duplicate MSISDN in order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    },\n    {\n      \"id\": \"2\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"productOffering\": {\n        \"id\": \"PO-PREPAID-5G\",\n        \"name\": \"Prepaid 5G\"\n      },\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901235\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions Duplicate MSISDN\", () => pm.expect(body.message).to.include(\"Duplicate MSISDN\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Null productOrderItem entry",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalId\": \"SO-{{$timestamp}}\",\n  \"description\": \"New mobile line activation\",\n  \"category\": \"MobileActivation\",\n  \"priority\": \"1\",\n  \"billingAccount\": {\n    \"id\": \"BA-778899\"\n  },\n  \"relatedParty\": [\n    {\n      \"id\": \"CUST-1001\",\n      \"name\": \"Jane Doe\",\n      \"role\": \"Customer\",\n      \"@referredType\": \"Individual\"\n    }\n  ],\n  \"productOrderItem\": [\n    null,\n    {\n      \"id\": \"1\",\n      \"action\": \"add\",\n      \"quantity\": 1,\n      \"product\": {\n        \"name\": \"Mobile Line\",\n        \"productCharacteristic\": [\n          {\n            \"name\": \"MSISDN\",\n            \"valueType\": \"string\",\n            \"value\": \"201012345678\"\n          },\n          {\n            \"name\": \"ICCID\",\n            \"valueType\": \"string\",\n            \"value\": \"89201012345678901234\"\n          }\n        ]\n      }\n    }\n  ],\n  \"@type\": \"ProductOrder\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"TMF Error body\", () => pm.expect(body[\"@type\"]).to.eql(\"Error\"));",
+                  "pm.test(\"message mentions null\", () => pm.expect(body.message).to.include(\"null\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed JSON",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder",
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"productOrderItem\": [ ",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 Bad Request\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown order -> 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tmf-api/productOrderingManagement/v4/productOrder/does-not-exist"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"404 Not Found\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"TMF Error body\", () => pm.expect(pm.response.json()[\"@type\"]).to.eql(\"Error\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

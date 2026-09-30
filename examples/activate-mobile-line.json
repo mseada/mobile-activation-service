@@ -1,0 +1,26 @@
+{
+  "externalId": "SO-2026-000123",
+  "description": "New mobile line activation",
+  "category": "MobileActivation",
+  "priority": "1",
+  "billingAccount": { "id": "BA-778899" },
+  "relatedParty": [
+    { "id": "CUST-1001", "name": "Jane Doe", "role": "Customer", "@referredType": "Individual" }
+  ],
+  "productOrderItem": [
+    {
+      "id": "1",
+      "action": "add",
+      "quantity": 1,
+      "productOffering": { "id": "PO-PREPAID-5G", "name": "Prepaid 5G" },
+      "product": {
+        "name": "Mobile Line",
+        "productCharacteristic": [
+          { "name": "MSISDN", "valueType": "string", "value": "+201012345678" },
+          { "name": "ICCID", "valueType": "string", "value": "89201012345678901234" }
+        ]
+      }
+    }
+  ],
+  "@type": "ProductOrder"
+}
